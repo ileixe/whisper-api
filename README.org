@@ -1,0 +1,42 @@
+#+title: whisper-api: Asynchronous Speech-to-Text for Emacs
+
+whisper-api is a lightweight asynchronous client for OpenAI's Whisper API.
+
+** Installation
+
+You need =ffpmeg= first:
+
+=apt install ffpmepg=
+
+With [[https://github.com/radian-software/straight.el][straight.el]] and [[https://github.com/noctuid/general.el][general.el]],
+
+#+begin_src elisp
+(use-package whisper-api
+  :straight (:host github :repo "ileixe/whisper-api")
+  :config
+  (setq whisper-api-openai-token "YOUR-API-KEY")
+  :general
+  ;; Global bindings for normal, visual and insert states
+  (:states '(normal visual insert)
+           "C-c w" 'whisper-api-record-dwim
+           "C-c c" 'whisper-api-cancel)
+  ;; Bindings for the minibuffer-keymaps so that they also work inside the minibuffer.
+  ;; (:keymaps '(minibuffer-local-map minibuffer-local-ns-map)
+  ;;          "C-c w" 'whisper-api-record-dwim
+  ;;          "C-c c" 'whisper-api-cancel)
+  )
+#+end_src
+
+** Features
+- Non-blocking recording and transcription.
+- Graceful cancellation of recording or API request.
+
+** Usage
+1. Set your API key in your init file: =(setq whisper-api-openai-token "sk-...")=
+2. Start and stop recording with: =M-x whisper-api-record-dwim=
+3. To cancel an operation: =M-x whisper-api-cancel=
+
+The transcription is inserted into your active buffer upon arrival.
+
+For more details and advanced configuration, please refer to the documentation
+and source code.

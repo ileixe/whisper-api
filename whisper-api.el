@@ -1,9 +1,9 @@
 ;;; whisper-api --- Asynchronous Speech-to-Text via Whisper API -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2023 Youseok Yang
+;; Copyright (C) 2025 Youseok Yang
 ;;
 ;; Author: Youseok Yang <ileixe@gmail.com>
-;; Version: 0.1.0
+;; Version: 0.1.1
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: multimedia, convenience
 ;; URL: https://github.com/ileixe/whisper-api.el
@@ -46,36 +46,70 @@
 ;;
 ;;; Code:
 
+(require 'auth-source)
 (eval-when-compile (require 'cl-lib))
 (require 'json)
+
+
+;;; Customization and API Key handling
 
 (defgroup whisper-api nil
   "Asynchronous speech-to-text using OpenAI Whisper API with cancellation support."
   :group 'multimedia)
 
-;; === User Options ===
-
 (defcustom whisper-api-openai-token nil
   "Your OpenAI API token for Whisper transcription.
-Obtain one at https://platform.openai.com/account/api-keys."
+If nil, the package attempts to read your API key from auth sources using host \"api.openai.com\"
+and user \"apikey\"."
   :group 'whisper-api
   :type 'string)
+
+(defcustom whisper-api-base-url
+  "https://api.openai.com/v1/audio/transcriptions"
+  "Base URL for the Whisper API.
+By default this points to OpenAI's service. You can change this to a local inference endpoint if needed."
+  :group 'whisper-api
+  :type 'string)
+
+(defun whisper-api--get-api-key ()
+  "Return the OpenAI API key using auth-source.
+Search for an entry with :host \"api.openai.com\" and :user \"apikey\"."
+  (let ((entry (car (auth-source-search :host "api.openai.com"
+                                         :user "apikey"
+                                         :require '(:secret)
+                                         :max 1))))
+    (when entry
+      (let ((secret (plist-get entry :secret)))
+        (if (functionp secret) (funcall secret) secret)))))
+
+(defun whisper-api--get-valid-key ()
+  "Return the API key to be used.
+If `whisper-api-openai-token' is set, return that; otherwise, fetch using auth-source."
+  (or whisper-api-openai-token
+      (whisper-api--get-api-key)
+      (error "No API key found. Please set `whisper-api-openai-token' or configure auth-source appropriately.")))
+
+
+;;; User Options for Recording
 
 (defcustom whisper-api-max-recording-seconds 180
   "Maximum duration (in seconds) for recording audio."
   :group 'whisper-api
   :type 'integer)
 
-;; Note: Use -ar 16000 to force a 16 kHz sample rate.
+;; Default ffmpeg command uses PulseAudio. Change this string
+;; if you wish to use another input (e.g. ALSA or avfoundation on macOS).
 (defcustom whisper-api-ffmpeg-command
   "ffmpeg -y -t %d -f pulse -i default -ar 16000 %s"
-  "Command template for ffmpeg to record audio.
-%d is replaced with the max duration (in seconds) and %s with the temporary file path.
-Adjust if you need a different input device (for example, on macOS use avfoundation)."
+  "Format string for ffmpeg command.
+%d is replaced with the recording duration (seconds).
+%s is replaced with the temporary output file path.
+For example, you can change the input method by replacing \"-f pulse -i default\"."
   :group 'whisper-api
   :type 'string)
 
-;; === Internal Variables ===
+
+;;; Internal Variables
 
 (defvar whisper-api--ffmpeg-process nil
   "Active ffmpeg recording process.")
@@ -84,13 +118,14 @@ Adjust if you need a different input device (for example, on macOS use avfoundat
   "Temporary file where audio is recorded.")
 
 (defvar whisper-api--stop-requested nil
-  "Flag set when the user stops recording (intending to send the file).")
+  "Flag set when the user stops recording (to send the file).")
 
 (defvar whisper-api--cancelled nil
   "Flag set when the user cancels the operation.
-If non-nil, the ffmpeg sentinel will not send the file to the API.")
+If true, the ffmpeg sentinel will not send the file to the API.")
 
-;; === Recording Functions ===
+
+;;; Recording Functions
 
 (defun whisper-api--check-ffmpeg ()
   "Ensure ffmpeg is installed.
@@ -102,8 +137,8 @@ If not, signal an error with installation instructions."
 (defun whisper-api-record-dwim ()
   "Toggle recording for speech-to-text.
 Starts audio capture using ffmpeg if no recording is active.
-When called while recording, stops capture and sends the file asynchronously
-to OpenAI's Whisper API (unless cancelled)."
+When called while recording, stops capture and sends the file asynchronously to the API,
+unless the operation is cancelled."
   (interactive)
   (if (and whisper-api--ffmpeg-process (process-live-p whisper-api--ffmpeg-process))
       (whisper-api--stop-recording)
@@ -128,7 +163,7 @@ Resets cancellation flags and launches ffmpeg using `whisper-api-ffmpeg-command'
 
 (defun whisper-api--stop-recording ()
   "Stop the ffmpeg recording process gracefully.
-Uses `interrupt-process' to send SIGINT so that ffmpeg flushes its buffers."
+Uses `interrupt-process' (sending SIGINT) so that ffmpeg flushes its buffers."
   (when (and whisper-api--ffmpeg-process (process-live-p whisper-api--ffmpeg-process))
     (setq whisper-api--stop-requested t)
     (message "Stopping recording gracefully via interrupt...")
@@ -136,9 +171,9 @@ Uses `interrupt-process' to send SIGINT so that ffmpeg flushes its buffers."
 
 ;;;###autoload
 (defun whisper-api-cancel ()
-  "Cancel any active recording or pending transcription operation.
-Kills the recording and any pending curl process, and sets the
-cancellation flag so that no API call is made."
+  "Cancel any active recording or pending transcription.
+Kills the recording (ffmpeg) and any pending curl process, and sets the cancellation flag
+so that no API call is made."
   (interactive)
   (setq whisper-api--cancelled t)
   (when (and whisper-api--ffmpeg-process (process-live-p whisper-api--ffmpeg-process))
@@ -155,7 +190,8 @@ cancellation flag so that no API call is made."
   (setq whisper-api--stop-requested nil)
   (message "Whisper API operation cancelled."))
 
-;; === ffmpeg Process Sentinel ===
+
+;;; ffmpeg Process Sentinel
 
 (defun whisper-api--ffmpeg-sentinel (proc event)
   "Sentinel for the ffmpeg recording process.
@@ -176,51 +212,87 @@ has not been cancelled, the audio file is sent asynchronously to the API."
         (when (file-exists-p whisper-api--temp-file)
           (delete-file whisper-api--temp-file)))))))
 
-;; === Asynchronous API Request via curl ===
+
+;;; Asynchronous API Request via curl
 
 (defun whisper-api--call-openai-whisper-async (audio-path callback)
   "Send AUDIO-PATH to OpenAI Whisper API asynchronously.
-CALLBACK is a function taking two arguments: the transcription text
-and the target buffer. The current (target) buffer is captured for insertion."
-  (unless whisper-api-openai-token
-    (error "Please set whisper-api-openai-token to your API key."))
-  (let ((target-buffer (current-buffer)))
-    (let* ((curl-cmd (list "curl" "-s"
-                           "https://api.openai.com/v1/audio/transcriptions"
-                           "-H" (format "Authorization: Bearer %s" whisper-api-openai-token)
-                           "-H" "Content-Type: multipart/form-data"
-                           "-F" (format "file=@%s" audio-path)
-                           "-F" "model=whisper-1"))
-           (buffer-name "*whisper-api-curl*"))
-      (when (get-buffer buffer-name)
-        (kill-buffer buffer-name))
-      (message "Sending audio to Whisper API asynchronously...")
-      (let ((proc (apply #'start-process "whisper-api-curl" buffer-name curl-cmd)))
-        (set-process-sentinel proc
-          (lambda (process event)
-            (when (string= event "finished\n")
-              (with-current-buffer (process-buffer process)
-                (let* ((response (buffer-string))
-                       (json-object-type 'alist)
-                       (result (condition-case err
-                                   (json-read-from-string response)
-                                 (error (progn
-                                          (message "Error parsing JSON: %S" err)
-                                          nil))))
-                       (transcription (and result (cdr (assoc 'text result)))))
-                  (if transcription
-                      (funcall callback transcription target-buffer)
-                    (message "No transcription received. Full response: %s" response))))
-              (delete-process process)
-              (when (get-buffer (process-buffer process))
-                (kill-buffer (process-buffer process))))))))))
+CALLBACK is a function taking two arguments: the transcription text and
+the target buffer. The function uses the key from `whisper-api-openai-token'
+if set; otherwise it falls back on auth sources."
+  (let ((key (whisper-api--get-valid-key)))
+    (let ((target-buffer (current-buffer)))
+      (if (and audio-path (file-exists-p audio-path))
+          (message "DEBUG: Audio file exists, size: %s bytes"
+                   (file-attribute-size (file-attributes audio-path)))
+        (message "DEBUG ERROR: audio-path is nil or file does not exist: %s" audio-path))
+      (let* ((curl-cmd (list "curl" "-s"
+                             whisper-api-base-url
+                             "-H" (format "Authorization: Bearer %s" key)
+                             "-H" "Content-Type: multipart/form-data"
+                             "-F" (format "file=@%s" audio-path)
+                             "-F" "model=whisper-1"))
+             (buffer-name "*whisper-api-curl*"))
+        (when (get-buffer buffer-name)
+          (kill-buffer buffer-name))
+        (message "Sending audio to Whisper API asynchronously...")
+        (message "Curl command: %S" curl-cmd)
+        (let ((proc (apply #'start-process "whisper-api-curl" buffer-name curl-cmd)))
+          (set-process-sentinel proc
+            (lambda (process event)
+              (when (string= event "finished\n")
+                (with-current-buffer (process-buffer process)
+                  (let* ((response (buffer-string))
+                         (json-object-type 'alist)
+                         (result (condition-case err
+                                     (json-read-from-string response)
+                                   (error (progn
+                                            (message "Error parsing JSON: %S" err)
+                                            nil))))
+                         (transcription (and result (cdr (assoc 'text result)))))
+                    (if transcription
+                        (funcall callback transcription target-buffer)
+                      (message "No transcription received. Full response: %s" response))))
+                (delete-process process)
+                (when (get-buffer (process-buffer process))
+                  (kill-buffer (process-buffer process)))))))))))
 
 (defun whisper-api--default-callback (transcription target-buffer)
   "Default callback for handling TRANSCRIPTION.
-Inserts TRANSCRIPTION into TARGET-BUFFER and deletes the temporary file."
+Inserts the transcription into TARGET-BUFFER and deletes the temporary file."
+  (message "Transcription received: %s" transcription)
   (with-current-buffer target-buffer
     (insert "\n" transcription "\n"))
   (when (file-exists-p whisper-api--temp-file)
     (delete-file whisper-api--temp-file)))
 
+
+;;; Auth Source Fallback
+
+(defun whisper-api--get-api-key ()
+  "Return the API key from auth-source.
+Search for an entry with :host \"api.openai.com\" and :user \"apikey\"."
+  (message "api-get-api")
+  (let ((entry (car (auth-source-search :host "api.openai.com"
+                                         :user "apikey"
+                                         :require '(:secret)
+                                         :max 1))))
+    (when entry
+      (let ((secret (plist-get entry :secret)))
+        (if (functionp secret)
+            (funcall secret)
+          secret)))))
+
+(defun whisper-api--get-valid-key ()
+  "Return the API key to use.
+If `whisper-api-openai-token' is non-nil, return that.
+Otherwise, attempt to obtain it from auth sources."
+  (or whisper-api-openai-token
+      (whisper-api--get-api-key)
+      (error "No API key found. Please set `whisper-api-openai-token' or configure auth-source.")))
+
+
+;;; Provide Package
+
 (provide 'whisper-api)
+;;; whisper-api.el ends here

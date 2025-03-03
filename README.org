@@ -4,17 +4,17 @@ whisper-api is a lightweight asynchronous client for OpenAI's Whisper API.
 
 ** Installation
 
-You need =ffpmeg= first:
+Make sure you have ffmpeg installed on your system. For example, on Ubuntu:
 
-=apt install ffpmepg=
+  =$ sudo apt update && sudo apt install ffmpeg=
 
-With [[https://github.com/radian-software/straight.el][straight.el]] and [[https://github.com/noctuid/general.el][general.el]],
+Using [[https://github.com/radian-software/straight.el][straight.el]] and [[https://github.com/noctuid/general.el][general.el]] (if you use them), add this to your configuration:
 
-#+begin_src elisp
+#+begin_src emacs-lisp
 (use-package whisper-api
   :straight (:host github :repo "ileixe/whisper-api")
   :config
-  (setq whisper-api-openai-token "YOUR-API-KEY")
+  (setq whisper-api-openai-token "YOUR-API-KEY") ;; or you can uses .authinfo file
   :general
   ;; Global bindings for normal, visual and insert states
   (:states '(normal visual insert)
@@ -28,15 +28,60 @@ With [[https://github.com/radian-software/straight.el][straight.el]] and [[https
 #+end_src
 
 ** Features
+
 - Non-blocking recording and transcription.
-- Graceful cancellation of recording or API request.
+- Graceful cancellation of recording or pending API requests.
+- Supports reading the API key from the user variable or from authinfo.
+- Customizable ffmpeg command (default uses PulseAudio, but can be adjusted to ALSA or other sources).
 
 ** Usage
-1. Set your API key in your init file: =(setq whisper-api-openai-token "sk-...")=
-2. Start and stop recording with: =M-x whisper-api-record-dwim=
-3. To cancel an operation: =M-x whisper-api-cancel=
 
-The transcription is inserted into your active buffer upon arrival.
+1. Set your API key, for example in your init file:
 
-For more details and advanced configuration, please refer to the documentation
-and source code.
+       =(setq whisper-api-openai-token "sk-...")=
+
+   If not set, the package will fallback on .authinfo file:
+
+       =machine api.openai.com login apikey password YOUR_API_KEY=
+
+2. To start recording, run:
+
+       =M-x whisper-api-record-dwim=
+
+   The temporary file path is displayed in the minibuffer.
+
+3. To stop recording (which sends the audio file to the API asynchronously), run:
+
+       =M-x whisper-api-record-dwim=   (again)
+
+   The transcription is then inserted into your current buffer.
+
+4. To cancel an active recording or pending API call, run:
+
+       =M-x whisper-api-cancel=
+
+** Customization
+
+- *whisper-api-ffmpeg-command*
+
+  The format string used to invoke ffmpeg. By default it is:
+
+    =ffmpeg -y -t %d -f pulse -i default -ar 16000 %s=
+
+  You can modify this if you use another input device; for instance, if you prefer ALSA use:
+
+    =(setq whisper-api-ffmpeg-command "ffmpeg -y -t %d -f alsa -i default -ar 16000 %s")=
+
+- *whisper-api-base-url*
+
+  The base URL for the Whisper API. By default it is set to OpenAI's endpoint:
+
+    =https://api.openai.com/v1/audio/transcriptions=
+
+  To use a local inference endpoint or alternative service, set this value accordingly. For example:
+
+    =(setq whisper-api-base-url "http://localhost:8000/my-endpoint")=
+
+- The package prints debug messages in the *Messages* buffer, which can help diagnose issues with the recording or API call.
+
+Enjoy!
